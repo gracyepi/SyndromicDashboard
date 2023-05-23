@@ -1,0 +1,1820 @@
+---
+title: " DSTT Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+    orientation: columns
+    logo: kdhe_logo.jpg
+params:
+  username:
+    label: "NSSP Username:"
+    value: ""
+    input: text
+  password:
+    label: "NSSP Password: "
+    value: ""
+    input: password
+    placeholder: "password"
+  age_group:
+    label: "Select Age Group"
+    value: ""
+    choices: ["10-Year Age Groups","CDC ILI Reporting Age Groups","NCHS Age Groups","School Age Groups","Standard 13 Age Groups"]
+  definition: 
+    label: "Syndrome Definition: " 
+    value: ""
+    input: select
+    choices: !r  syndef <- readRDS("syndef.rds"); syndef <- dplyr::pull(syndef, display)
+  comparison1:
+    label: "Comparison Syndrome 1: "
+    value: ""
+    input: select
+    choices: !r syndef <- readRDS("syndef.rds"); syndef <- dplyr::pull(syndef, display)
+  comparison2:
+    label: "Comparison Syndrome 2: "
+    value: ""
+    input: select
+    choices: !r syndef <- readRDS("syndef.rds"); syndef <- dplyr::pull(syndef, display)
+  start_date:
+    label: "Enter Start Date: "
+    value: !r lubridate::ceiling_date(Sys.Date() - 60, unit = "1 week")
+    input: date
+  end_date:
+    label: "Enter End Date: "
+    value: !r lubridate::floor_date(Sys.Date(), unit = "1 week") - 1
+    input: date
+  map: 
+    label: "Map Selection:"
+    value: ""
+    input: select
+    choices: ["County View", "Zip Code Tabulated Area"]
+  has_been_E: 
+    label: "Has Been Emergency: "
+    value: true
+editor_options: 
+  chunk_output_type: console
+---
+
+<style>                     
+.navbar {
+  background-color:#F1AD02;
+}
+.navbar-inverse .navbar-nav > li > a:hover,
+.navbar-inverse .navbar-nav > li > a:focus {
+    background-color: #002569;
+    color: white;
+}
+.navbar-inverse .navbar-nav > .active > a,
+.navbar-inverse .navbar-nav > .active > a:hover,
+.navbar-inverse .navbar-nav > .active > a:focus {
+  color: white;
+  background-color: #002569;
+}
+.navbar-inverse .navbar-toggle:hover,
+.navbar-inverse .navbar-toggle:focus {
+  background-color: #002569;
+}
+.navbar-inverse .navbar-collapse,
+.navbar-inverse .navbar-form {
+  border-color: #002569;
+}
+</style> 
+
+
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(sf)
+library(tidyverse)
+library(cowplot)
+library(Rnssp)
+library(ggrepel)
+library(gghighlight)
+library(ggraph)
+library(ggthemes)
+library(knitr)
+library(apyramid)
+library(tidytext)
+library(janitor)
+library(MMWRweek)
+library(lubridate)
+library(shiny)
+library(plotly)
+library(DT)
+library(sparkline)
+library(shinydashboard)
+library(tmap)
+library(tmaptools)
+library(widyr)
+library(igraph)
+library(visNetwork)
+library(flextable)
+library(tidycensus)
+library(zoo)
+library(viridis)
+library(anytime)
+library(timeDate)
+library(tidygraph)
+library(rmarkdown)
+
+```
+
+
+```{css, echo=FALSE}
+.fluid-row {
+  font-size: 5.9vw;
+}
+```
+
+
+```{r, echo=FALSE, results='hide'}
+#set start and end dates for query
+endDate <- format(params$end_date, "%d%b%Y")
+startDate <- format(params$start_date, "%d%b%Y")
+
+hasBeenE <- as.numeric(params$has_been_E)
+
+definition <- params$definition
+definition_pattern <- as.character(str_match(definition, pattern = "CCDD|SUBSYNDROME|SYNDROME"))
+comparison1 <- params$comparison1
+comparison1_pattern <- as.character(str_match(comparison1, pattern = "CCDD|SUBSYNDROME|SYNDROME"))
+comparison2 <- params$comparison2
+comparison2_pattern <- as.character(str_match(comparison2, pattern = "CCDD|SUBSYNDROME|SYNDROME"))
+
+if (definition_pattern == "CCDD") {
+  definition_string <- str_replace_all(str_remove_all(tolower(definition), "ccdd "), " ", "%20")
+  definition_type <- "&ccddCategory="
+  grouping_system <- "essencesyndromes"
+}
+
+if (definition_pattern == "SUBSYNDROME") {
+  definition_type <- "&medicalGrouping="
+  grouping_system <- "chiefcomplaintsubsyndromes"
+}
+
+if (definition_pattern == "SYNDROME") {
+  definition_string <- str_replace_all(str_remove_all(tolower(definition), "syndrome: "), " ", "%20")
+  definition_type <- "&syndrome="
+  grouping_system <- "essencesyndromes"
+}
+
+if (comparison1_pattern == "CCDD") {
+  comparison1_string <- str_replace_all(str_remove_all(tolower(comparison1), "ccdd "), " ", "%20")
+  comparison1_type <- "&ccddCategory="
+  grouping_systemc1 <- "essencesyndromes"
+}
+
+if (comparison1_pattern == "SUBSYNDROME") {
+  comparison1_type <- "&medicalGrouping="
+  grouping_systemc1 <- "chiefcomplaintsubsyndromes"
+}
+
+if (comparison1_pattern == "SYNDROME") {
+  comparison1_string <- str_replace_all(str_remove_all(tolower(comparison1), "syndrome: "), " ", "%20")
+  comparison1_type <- "&syndrome="
+  grouping_systemc1 <- "essencesyndromes"
+}
+
+
+if (comparison2_pattern == "CCDD") {
+  comparison2_string <- str_replace_all(str_remove_all(tolower(comparison2), "ccdd "), " ", "%20")
+  comparison2_type <- "&ccddCategory="
+  grouping_systemc2 <- "essencesyndromes"
+}
+
+if (comparison2_pattern == "SUBSYNDROME") {
+  comparison2_type <- "&medicalGrouping="
+  grouping_systemc2 <- "chiefcomplaintsubsyndromes"
+}
+
+if (comparison2_pattern == "SYNDROME") {
+  comparison2_string <- str_replace_all(str_remove_all(tolower(comparison2), "syndrome: "), " ", "%20")
+  comparison2_type <- "&syndrome="
+  grouping_systemc2 <- "essencesyndromes"
+}
+
+#Lauren brought in suicide attempt data, team feel free to make changes
+url1 <- paste0("https://essence2.syndromicsurveillance.org/nssp_essence/api/dataDetails/csv?endDate=", endDate, "&percentParam=noPercent&datasource=va_hosp&startDate=", startDate, "&medicalGroupingSystem=", grouping_system, "&userId=4228&aqtTarget=DataDetails", definition_type, definition_string, "&geographySystem=hospital&detector=nodetectordetector&timeResolution=daily&hasBeenE=", hasBeenE)
+
+url2 <- paste0("https://essence2.syndromicsurveillance.org/nssp_essence/api/dataDetails/csv?endDate=", endDate, "&percentParam=noPercent&datasource=va_hosp&startDate=", startDate, "&medicalGroupingSystem=", grouping_systemc1, "&userId=4228&aqtTarget=DataDetails", comparison1_type, comparison1_string, "&geographySystem=hospital&detector=nodetectordetector&timeResolution=daily&hasBeenE=", hasBeenE)
+
+url3 <- paste0("https://essence2.syndromicsurveillance.org/nssp_essence/api/dataDetails/csv?endDate=", endDate, "&percentParam=noPercent&datasource=va_hosp&startDate=", startDate, "&medicalGroupingSystem=", grouping_systemc2, "&userId=4228&aqtTarget=DataDetails", comparison2_type, comparison2_string, "&geographySystem=hospital&detector=nodetectordetector&timeResolution=daily&hasBeenE=", hasBeenE)
+
+myProfile <- Credentials$new(
+  username = params$username,
+  password = params$password
+)
+
+#assign URL to API
+
+query <-try(myProfile$get_api_data(url1, fromCSV = TRUE),silent=T)
+premature_knit <- all(class(query) =="try-error")
+
+queryc <-myProfile$get_api_data(url1, fromCSV = TRUE) %>% mutate(category=params$definition)
+return(queryc)
+#premature_knit <- all(class(query) =="try-error")
+
+queryc1 <-myProfile$get_api_data(url2, fromCSV = TRUE) %>% mutate(category=params$comparison1)
+return(queryc1)
+#premature_knit <- all(class(query) =="try-error")
+
+queryc2 <- myProfile$get_api_data(url3, fromCSV = TRUE) %>% mutate(category=params$comparison2)
+return(queryc2)
+#premature_knit <- all(class(query) =="try-error")
+
+allquery <- rbind(queryc,queryc1,queryc2)
+  
+columnsc <- queryc %>%
+  mutate(PID=row_number()) %>%
+  select(PID,CCDDCategory_flat,category)
+
+unnestc <- columnsc %>% 
+  unnest_tokens(word,CCDDCategory_flat, token='regex',pattern=';') %>%
+  group_by(word) %>%
+  #filter(n() > 10) %>%
+  ungroup()
+
+wordcountc <- count(unnestc,word,sort=TRUE)
+
+countbysyndrc <- unnestc %>%
+  count(category, word, sort=TRUE)
+  
+columnsc1 <- queryc1 %>%
+  mutate(PID=row_number()) %>%
+  select(PID,CCDDCategory_flat, category)
+
+unnestc1 <- columnsc1 %>% 
+  unnest_tokens(word,CCDDCategory_flat, token='regex',pattern=';') %>%
+  group_by(word) %>%
+  #filter(n() > 10) %>%
+  ungroup()
+
+wordcountc1 <- count(unnestc1,word,sort=TRUE)
+
+countbysyndrc1 <- unnestc1 %>%
+  count(category, word, sort=TRUE)
+
+columnsc2 <- queryc2 %>%
+  mutate(PID=row_number()) %>%
+  select(PID,CCDDCategory_flat, category)
+
+unnestc2 <- columnsc2 %>% 
+  unnest_tokens(word,CCDDCategory_flat, token='regex',pattern=';') %>%
+  group_by(word) %>%
+ #filter(n() > 10) %>%
+  ungroup()
+
+wordcountc2 <- count(unnestc2,word,sort=TRUE)
+
+countbysyndrc2 <- unnestc2 %>%
+  count(category, word, sort=TRUE)
+
+
+countbysyndrc$total <- max(countbysyndrc$n)
+
+countbysyndrc$freq <- round(countbysyndrc$n / countbysyndrc$total *100,1) 
+
+comparetable1 = select(countbysyndrc,-1)
+
+countbysyndrc1$total <- max(countbysyndrc1$n)
+
+countbysyndrc1$freq <- round(countbysyndrc1$n / countbysyndrc1$total *100,1) 
+
+comparetable2 = select(countbysyndrc1,-1)
+
+countbysyndrc2$total <- max(countbysyndrc2$n)
+
+countbysyndrc2$freq <- round(countbysyndrc2$n / countbysyndrc2$total *100,1) 
+
+comparetable3 = select(countbysyndrc2,-1)
+
+
+
+```
+
+
+
+```{r, show_col_types = FALSE}
+query_clean <-  query %>%
+  mutate(State=str_sub(Region,1,2)) %>% #pull "KS" out of region
+  mutate(Region=str_sub(Region,4,-1)) %>% #pull county name from region
+  filter(State=="KS")  %>% #keep only patients who were in Kansas 
+  mutate(Age = as.numeric(Age)) %>% #convert age from character to numeric
+  mutate(Month_num = substr(Date,1,2)) %>% #parse month
+  filter(Sex != "U")
+
+#created functions to have "prettier" race/ethnicity field instead of two
+
+raceeth <- function(query_clean){
+  query_clean <- query_clean %>%
+      mutate(
+        raceethnicity = case_when(
+        c_race == "White" & c_ethnicity == "Not Hispanic or Latino" ~ "White, Non-Hispanic",
+        c_race == "Black or African American" & c_ethnicity == "Not Hispanic or Latino" ~ "Black, Non-Hispanic",
+        c_race == "American Indian or Alaska Native" & c_ethnicity == "Not Hispanic or Latino" ~ "American Indian or Alaska Native, Non-Hispanic",
+        c_race == "Asian" | c_race == "Native Hawaiian or Other Pacific Islander" & c_ethnicity == "Not Hispanic or Latino" ~ "Asian/Pacific Islander, Non-Hispanic",
+        c_race == "Multiracial" & c_ethnicity == "Not Hispanic or Latino" ~ "Multiracial, Non-Hispanic",
+        c_race == "Other Race" & c_ethnicity == "Not Hispanic or Latino" ~ "Other, Non-Hispanic",
+        c_ethnicity == "Hispanic or Latino" ~ "Hispanic"))}
+
+#created function for Month to appear as written out month; this is a personal choice
+add_month <- function(query_clean){
+  query_clean <- query_clean %>%
+    mutate(Month = case_when(
+      Month_num == "01" ~ "January",
+      Month_num == "02" ~ "February",
+      Month_num == "03" ~ "March",
+      Month_num == "04" ~ "April",
+      Month_num == "05" ~ "May",
+      Month_num == "06" ~ "June",
+      Month_num == "07" ~ "July",
+      Month_num == "08" ~ "August",
+      Month_num == "09" ~ "September",
+      Month_num == "10" ~ "October",
+      Month_num == "11" ~ "November",
+      Month_num == "12" ~ "December"))}
+
+# apply filter to data set
+query_clean <- raceeth(
+              add_month(query_clean)) 
+              
+
+```
+
+```{r, show_col_types = FALSE}
+# setting age group parameters
+if(params$age_group =="10-Year Age Groups"){
+  query_clean <- query_clean %>%
+    mutate(AgeGroup = case_when(
+      Age < 10 ~ "00-09 years",
+      Age >= 10 & Age <= 19 ~ "10-19 years",
+      Age >=20 & Age <=29 ~ "20-29 years",
+      Age >=30 & Age <=39 ~ "30-39 years",
+      Age >=40 & Age <= 49 ~ "40-49 years",
+      Age >=50 & Age <= 59 ~ "50-59 years",
+      Age >= 60 & Age <=69 ~ "60-69 years",
+      Age >= 70 & Age <= 79 ~ "70-79 years",
+      Age >=80 & Age <= 89 ~ "80-89 years",
+      Age >= 90 & Age <= 99 ~ "90-99 years",
+      Age >= 100 ~ "100+ years"))
+  query_clean$AgeGroup <- factor(query_clean$AgeGroup, levels = c('00-09 years','10-19 years','20-29 years', '30-39 years',
+                                                                  '40-49 years', '50-59 years','60-69 years',
+                                                                  '70-79 years', '80-89 years', '90-99 years',
+                                                                  '100+ years'))}  
+
+if(params$age_group == "CDC ILI Reporting Age Groups"){
+  query_clean <- query_clean %>%
+    mutate(AgeGroup = case_when(
+      Age < 5 ~ "00-04 years",
+      Age >= 5 & Age <= 24 ~ "05-24 years",
+      Age >= 25 & Age <= 49 ~ "25-49 years",
+      Age >= 50 & Age <= 64 ~ "50-64 years",
+      Age >= 65 ~ "65+ years"))
+  query_clean$AgeGroup <- factor(query_clean$AgeGroup, levels= c('00-04 years','05-24 years','25-49 years','50-64 years','65+ years'))}
+
+if(params$age_group == "NCHS Age Groups"){
+  query_clean <- query_clean %>%
+    mutate(AgeGroup = case_when(
+      Age < 11 ~ "00-10 years",
+      Age >= 11 & Age <= 14 ~ "11-14 years",
+      Age >= 15 & Age <= 24 ~ "15-24 years",
+      Age >= 25 & Age <= 34 ~ "25-34 years",
+      Age >= 35 & Age <= 44 ~ "35-44 years",
+      Age >= 45 & Age <= 54 ~ "45-54 years",
+      Age >= 55 & Age <= 64 ~ "55-64 years",
+      Age >= 65 & Age <= 74 ~ "65-74 years",
+      Age >= 75 & Age <= 84 ~ "75-84 yeras",
+      Age >= 85 ~ "85+ years"))
+  query_clean$AgeGroup <- factor(query_clean$AgeGroup, levels= c('00-10 years"','11-14 years','15-24 years','25-34 years',
+                                                                 '35-44 years','45-54 years','55-64 years', '65-74 years',
+                                                                 '75-84 yeras', '85+ years'))}
+
+if(params$age_group == "School Age Groups"){
+  query_clean <- query_clean %>%
+    mutate(AgeGroup = case_when(
+      Age <= 4 ~ "00-04 years",
+      Age >=5 & Age <= 11 ~ "05-11 years",
+      Age >= 12 & Age <= 17 ~ "12-17 years",
+      Age >= 18 & Age <= 25 ~ "18-25 years",
+      Age >= 26 & Age <= 34 ~ "26-34 years",
+      Age >= 35 & Age <= 44 ~ "35-44 years",
+      Age >= 45 & Age <= 54 ~ "45-54 years",
+      Age >= 55 & Age <= 64 ~ "55-64 years",
+      Age >= 65 ~ "65+ years"))
+  query_clean$AgeGroup <- factor(query_clean$AgeGroup, levels = c('00-04 years','5-11 years', '12-17 years','18-25 years','26-34 years',
+                                                         '35-44 years','45-54 years','55-64 years',
+                                                         '65+ years'))}
+
+if(params$age_group =="Standard 13 Age Groups"){
+  query_clean <- query_clean %>%
+    mutate(AgeGroup = case_when(
+      Age = 0 ~ "00 years",
+      Age >= 1 & Age <= 4 ~ "01-04 years",
+      Age >= 5 & age <= 9 ~ "05-09 years",
+      Age >= 10 & Age <= 14 ~ "10-14 years",
+      Age >= 15 & Age <= 19 ~ "15-19 years",
+      Age >= 20 & Age <= 24 ~ "20-24 years",
+      Age >= 25 & Age <= 34 ~ "25-34 years",
+      Age >= 35 & Age <= 44 ~ "35-44 years",
+      Age >= 45 & Age <= 54 ~ "45-54 years",
+      Age >= 55 & Age <= 64 ~ "55-64 years",
+      Age >= 65 & Age <= 74 ~  "65-74 years",
+      Age >= 75 & Age <= 84 ~ "75-84 years",
+      Age >= 85 ~ "85+ years"))
+  query_clean$AgeGroup <- factor(query_clean$AgeGroup, levels = c('00 years','01-04 years','05-09 years','10-14 years','15-19 years',
+                                                          '20-24 years','25-34 years','35-44 years','45-54 years','55-64 years',
+                                                         '65-74 years','75-84 years','85+ years'))}
+```
+
+```{r}
+
+#loading kansas county shapefile map
+#county_map <- sf::st_as_sf(maps::map("county", plot = FALSE, fill = TRUE, region = "kansas"))
+ks_county_sf <- read_sf('~jhodge01/KS_DSTT/ks_county_sf/ks_county_sf.shp')
+
+# loading ks zcta shapefile data
+ks_zcta_sf <- read_sf('~jhodge01/KS_DSTT/ks_zip_sf/KS_ZCTA_2021.shp')
+
+# loading ks county population data
+county_pop_data <- readRDS("county_pop_data.RDS") %>%
+  mutate(shortname = str_sub(NAME, start = 1, end = -15)) %>%
+  mutate(shortname = str_trim(shortname, side = c("both")))
+
+# loading ks zcta population data
+zcta_pop_data <- readRDS("zcta_pop_data.RDS")
+
+# joining county population data into shapefile
+ks_county_pop_sf <- left_join(ks_county_sf, county_pop_data, by = c("NAME" = "shortname"))
+
+# joining zcta population data into shapefile
+ks_zcta_pop_sf <- left_join(ks_zcta_sf, zcta_pop_data, by = c("ZCTA5CE20" = "GEOID"))
+```
+
+
+```{r}
+# tabulating how many records per zip code are in the query
+qrecords <- query_clean %>%
+  group_by(ZipCode) %>%
+  summarise(N_visits_per_zip = n()) %>%
+  mutate(ZipCode = as.character(ZipCode)) %>%
+  mutate(Visit_Count_Range = case_when(
+    N_visits_per_zip >= 1 & N_visits_per_zip <= 20 ~ "1 to 20",
+    N_visits_per_zip >= 21 & N_visits_per_zip <= 40 ~ "21 to 40",
+    N_visits_per_zip >= 41 & N_visits_per_zip <= 60 ~ "41 to 60",
+    N_visits_per_zip >= 61 & N_visits_per_zip <= 80 ~ "61 to 80",
+    N_visits_per_zip >= 81 & N_visits_per_zip <= 100 ~ "81 to 100",
+    N_visits_per_zip >= 101  ~ "Over 101"
+  ))
+
+```
+
+```{r}
+# tabulating how many records per State are in the query
+qrecords2 <- query_clean %>%
+  group_by(Region) %>%
+  summarise(N_visits_per_county = n()) %>%
+  mutate(Region = as.character(Region)) %>%
+  mutate(Visit_Count_Range = case_when(
+    N_visits_per_county >= 1 & N_visits_per_county <= 20 ~ "1 to 20",
+    N_visits_per_county >= 21 & N_visits_per_county <= 40 ~ "21 to 40",
+    N_visits_per_county >= 41 & N_visits_per_county <= 60 ~ "41 to 60",
+    N_visits_per_county >= 61 & N_visits_per_county <= 80 ~ "61 to 80",
+    N_visits_per_county >= 81 & N_visits_per_county <= 100 ~ "81 to 100",
+    N_visits_per_county >= 101  ~ "Over 101"
+  ))
+
+```
+
+
+```{r}
+# joining the zip code count query with the zip code map 
+combined <- 
+  left_join(ks_zcta_pop_sf, qrecords, by = c('ZCTA5CE20' = 'ZipCode') ) %>%
+  mutate(visit_rate = N_visits_per_zip / estimate *100) %>%
+  mutate(Visit_Rate = case_when(
+    visit_rate <= 1.0 ~ "Below 1 per 100",
+    visit_rate >= 1.01 & visit_rate <= 2.0 ~ "1 to 2",
+    visit_rate >= 2.01 & visit_rate <= 3.0 ~ "2 to 3",
+    visit_rate >= 3.01 & visit_rate <= 4.0 ~ "3 to 4",
+    visit_rate >= 4.01 & visit_rate <= 5.0 ~ "4 to 5",
+    visit_rate >= 5.01  ~ "Over 5 per 100"
+  ))
+
+```
+
+
+```{r}
+# joining the county count query with the county map 
+combined2 <-
+  left_join(ks_county_pop_sf, qrecords2, by = c('NAME' = 'Region') ) %>%
+  mutate(visit_rate = N_visits_per_county / estimate *100) %>%
+  mutate(Visit_Rate = case_when(
+    visit_rate <= 1.0 ~ "Below 1 per 100",
+    visit_rate >= 1.01 & visit_rate <= 2.0 ~ "1 to 2",
+    visit_rate >= 2.01 & visit_rate <= 3.0 ~ "2 to 3",
+    visit_rate >= 3.01 & visit_rate <= 4.0 ~ "3 to 4",
+    visit_rate >= 4.01 & visit_rate <= 5.0 ~ "4 to 5",
+    visit_rate >= 5.01  ~ "Over 5 per 100"
+  ))
+
+```
+
+```{r}
+#adjusting date formatted view for overview page
+format(endDate, format = "%Y-%m-%d") -> endDate
+endDate <- anydate(endDate)
+
+format(startDate, format = "%Y-%m-%d") -> startDate
+startDate <- anydate(startDate)
+```
+
+
+Overview
+=======================================================================
+
+
+Column 
+-----------------------------------------------------------------------
+
+
+### **Technical Notes**
+
+**Query Category:**  `r params$definition`
+
+**Time Frame:** `r startDate` to `r endDate`
+
+**Report Date:** `r Sys.Date()`  
+
+**Data Source:**  
+Electronic Surveillance System for the Early Notification of Community-based Epidemics (ESSENCE), Kansas Syndromic Surveillance System, Kansas Department of Health and Environment
+
+The Kansas Syndromic Surveillance Program (KSSP) quickly collects information from hospital emergency department (ED) and urgent care clinic visits. This provides KDHE, hospitals and local health departments insight into rapidly changing health conditions in the state. This data is used to describe emerging public health threats and enable the healthcare community to quickly identify health issues and take action to prevent injury and illness. About 98% of all Kansas ED patient visits each year are included in this data.
+These data are preliminary are not to be shared outside of approved use.
+
+
+**Analysis Definitions:**  
+Trend increase/decrease - weekly count of visits compared to previous 4 week mean; significantly decrease = weekly count less than 2 standard deviations below the mean, slight decrease = weekly count less than one standard deviation below mean & greater than two standard deviations below mean, no change = between one standard deviation below mean and one above the mean, slight increase = greater than one standard deviation above mean and below two standard deviations above mean, significant increase = greater than two standard deviations above mean
+
+**Tab Details:**
+
+*Demographic Snapshot* - Looks at age groups and race/ethnicity
+
+*Trends* - Provides changes over time including age and sex along with significant changes over time
+
+*Map Comparison* - Provides an interactive map to look at visit counts and rates across county or zip code tabulated area
+
+*Map Over Time* - Shows a transition of the amount of records coming in at the county level mapped over time
+
+*Term Network Graph* - Indicates clustered syndromes and discharge diagnosis codes along with the strength of associated connections between them
+
+*Increasing Terms & Codes* - Looks at increasing unigrams and ICD-10 codes with statistical significance and trend over time
+
+*Overlapping Syndromes* - Looks at relationship between other queries selected by the user
+
+
+**Link to Github:** 
+
+
+
+
+
+  
+
+
+Demographic Snapshot
+=======================================================================
+Column
+-----------------------------------------------------------------------
+###  Frequncies of `r params$definition` EDVs by Age Group, `r startDate` to `r endDate`
+```{r query_sex, echo=FALSE}
+# graph for race/ethnicity
+query_clean %>% 
+  dplyr::group_by(query_clean$AgeGroup)%>%
+  dplyr::filter(n()>5) %>%
+  ggplot(query_clean, mapping=(aes(x=AgeGroup)))+
+  geom_bar(color="#F1AD02", fill="#F1AD02")+
+  labs(y="# ED Visits", x="Age Group")+
+  geom_text(aes(label= ..count..),stat="count",vjust=-.25)+
+  theme_bw() + theme(text = element_text(),
+                     panel.border = element_blank(), 
+                     panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_blank(), 
+                     axis.ticks=element_blank(),
+                     axis.text.y=element_blank())+
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+```
+
+
+Column
+-----------------------------------------------------------------------
+### Population Pyramid of `r params$definition` EDVs by Age and Sex, `r startDate` to `r endDate`
+```{r agesex_graph, echo=F}
+# population pyramid
+query_sex <- query_clean %>% filter(Sex == "M" | Sex == "F")
+
+apyramid::age_pyramid(data = query_sex,
+                      age_group = "AgeGroup",
+                      split_by = "Sex",
+                      show_midpoint = F)+
+  theme_minimal()+
+  scale_fill_manual(
+    values = c("#002569","#F1AD02"),
+    labels= c("F" = "Female", "M" = "Male")) +
+  labs(x="Age Group",
+       y="# ED Visits") +
+  theme(
+    legend.position= "bottom"
+  )
+
+
+```
+
+Column
+-----------------------------------------------------------------------
+###  Frequncies of `r params$definition` EDVs by Race and Ethnicity, `r startDate` to `r endDate`
+```{r query_race, echo=FALSE}
+# graph for race/ethnicity
+query_clean %>% 
+  dplyr::group_by(query_clean$raceethnicity)%>%
+  dplyr::filter(n()>5) %>%
+  ggplot(query_clean, mapping=(aes(x=raceethnicity)))+
+  geom_bar(color="#002569", fill="#002569")+
+  labs(y="# ED Visits", x="Race/Ethnicity")+
+  geom_text(aes(label= ..count..),stat="count",vjust=-.25)+
+  theme_bw() + theme(text = element_text(),
+                     panel.border = element_blank(), 
+                     panel.grid.major = element_blank(),
+                     panel.grid.minor = element_blank(), 
+                     axis.line = element_blank(), 
+                     axis.ticks=element_blank(),
+                     axis.text.y=element_blank())+
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+```
+
+
+Trends {data-orientation=rows}
+=======================================================================
+
+Row 
+-----------------------------------------------------------------------
+
+### Time-Series Plot of `r params$definition` EDVs, `r startDate` to `r endDate`
+```{r trend_week}
+#time series - by week
+query_week <- query_clean %>%
+   count(WeekYear)
+# - for interactivity un-comment the next line, and the ggplotly at the bottom
+overviewtime <- 
+ggplot(query_week, aes(x=WeekYear, y=n, group=1))+
+  geom_line(color="#002569")+ geom_point(color="#002569")+
+  labs(x="Week of Year", y="# ED Visits")+
+  theme_minimal()+
+  theme(axis.text.x=element_text( angle=90 ),
+         panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), 
+        axis.ticks=element_blank())+ 
+  expand_limits(x=0, y=0)
+ggplotly(overviewtime)
+
+```
+
+
+### Age Group Time-Series Plot, `r params$definition`, `r startDate` to `r endDate`
+
+```{r age_trend, echo=F}
+query_week <- query_clean %>%
+  count(AgeGroup,WeekYear)
+agetime <- 
+ggplot(query_week, aes(x=WeekYear, y=n, group=AgeGroup, color=AgeGroup))+
+  geom_line()+ geom_point()+
+  theme_minimal()+
+  theme(axis.text.x=element_text( angle=90 ),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), 
+        axis.ticks=element_blank())+ 
+  expand_limits(x=0, y=0)+
+  labs(x="Week of Year", y="# ED Visits")
+ggplotly(agetime)
+```
+
+
+### Sex Time-Series Plot, `r params$definition`, `r startDate` to `r endDate`
+
+```{r sex_trend}
+query_week <- query_clean %>%
+  count(Sex,WeekYear)
+sextime <-
+ggplot(query_week, aes(x=WeekYear, y=n, group=Sex, color=Sex))+
+  geom_line()+ geom_point()+
+  theme_minimal()+
+  theme(axis.text.x=element_text( angle=90 ),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), 
+        axis.ticks=element_blank())+ 
+  expand_limits(x=0, y=0)+
+  labs(x="Week of Year", y="# ED Visits")
+ggplotly(sextime)#
+```
+
+
+
+Row
+-----------------------------------------------------------------------
+
+
+### Frequency, Previous 4-Week Mean, and Trend for Most Recent MMWR Week, `r params$definition`, `r startDate` to `r endDate`
+```{r trend_table}
+# add table to show weekly counts, previous 4-week mean
+weekly_counts <- query_clean %>% 
+  dplyr::count(WeekYear, name = "new_cases")
+
+rolling <- weekly_counts %>% 
+  mutate(mean_4wk = lag(rollapply(weekly_counts$new_cases,width=4,FUN=mean,fill=0,align="r")))%>%
+  mutate(sd = lag(rollapply(weekly_counts$new_cases,width=4,FUN=sd,fill=0,align="r")))
+#set values for increasing, decreasing by 1 z-score, 2 z-scores
+rolling <- rolling %>%
+  mutate(sdx2 = 2*sd)
+rolling <- rolling %>%
+  mutate(inc_1sd = mean_4wk+sd)%>%
+  mutate(inc_2sd = mean_4wk+sdx2)%>%
+  mutate(dec_1sd = mean_4wk-sd)%>%
+  mutate(dec_2sd = mean_4wk-sdx2)
+#create column to tell if weekly count is decreasing or increasing compared to mean and sd
+rolling <- rolling %>%
+  mutate(direction_change = case_when(
+    new_cases < dec_2sd ~ "Significant Decrease",
+    new_cases > dec_2sd & new_cases < dec_1sd ~ "Slight Decrease",
+    new_cases > dec_1sd & new_cases < inc_1sd ~ "No Change",
+    new_cases > inc_1sd & new_cases < inc_2sd ~ "Slight Increase",
+    new_cases > inc_2sd ~ "Significant Increase"
+  ))
+#arrange so most recent year is on the top of the table
+rolling <- arrange(rolling, by=desc(WeekYear))
+#select columns to show week year, count of cases, previous 4 week mean, and the trend
+rolling_summary <- select(rolling, WeekYear, new_cases, mean_4wk, direction_change)
+#show only the first 4 most recent weeks
+rolling_summary <- head(rolling_summary, 1)
+
+kable(rolling_summary, col.names=(c('Week of Year','Count','Previous 4-Week Mean', 'Trend for Current Week')), align='lccc')
+
+```
+
+
+
+### Frequency, Previous 4-Week Mean, and Trend by Age Group for Most Recent MMWR Week, `r params$definition`, `r startDate` to `r endDate`
+```{r age_trend_table}
+#rolling by agegroup
+weekly_counts <- query_clean %>% 
+  dplyr::count(AgeGroup, WeekYear, name = "new_cases")
+
+rolling <- weekly_counts %>% 
+  mutate(mean_4wk = lag(rollapply(weekly_counts$new_cases,width=4,FUN=mean,fill=0,align="r")))%>%
+  mutate(sd = lag(rollapply(weekly_counts$new_cases,width=4,FUN=sd,fill=0,align="r")))
+#set values for increasing, decreasing by 1 z-score, 2 z-scores
+rolling <- rolling %>%
+  mutate(sdx2 = 2*sd)
+rolling <- rolling %>%
+  mutate(inc_1sd = mean_4wk+sd)%>%
+  mutate(inc_2sd = mean_4wk+sdx2)%>%
+  mutate(dec_1sd = mean_4wk-sd)%>%
+  mutate(dec_2sd = mean_4wk-sdx2)
+#create column to tell if weekly count is decreasing or increasing compared to mean and sd
+rolling <- rolling %>%
+  mutate(direction_change = case_when(
+    new_cases < dec_2sd ~ "Significant Decrease",
+    new_cases > dec_2sd & new_cases < dec_1sd ~ "Slight Decrease",
+    new_cases > dec_1sd & new_cases < inc_1sd ~ "No Change",
+    new_cases > inc_1sd & new_cases < inc_2sd ~ "Slight Increase",
+    new_cases > inc_2sd ~ "Significant Increase"
+  ))
+
+
+
+rolling_summary <- select(rolling, WeekYear,AgeGroup, new_cases, mean_4wk, direction_change)
+
+rolling_summary <- rolling_summary %>% group_by(AgeGroup) %>% 
+  arrange(desc(WeekYear)) %>% 
+  filter(row_number() == 1)
+
+
+kable(rolling_summary, col.names=(c('Week of Year','Age Group','Count','Previous 4-Week Mean', 'Trend for Current Week')), align='llccc')
+```
+
+
+
+### Frequency, Previous 4-Week Mean, and Trend by Sex for Most Recent MMWR Week, `r params$definition`, `r startDate` to `r endDate`
+```{r sex_trend_table}
+#rolling by sex
+weekly_counts <- query_clean %>% 
+  filter(Sex != "U")%>%
+  dplyr::count(Sex, WeekYear, name = "new_cases")
+
+rolling <- weekly_counts %>% 
+  mutate(mean_4wk = lag(rollapply(weekly_counts$new_cases,width=4,FUN=mean,fill=0,align="r")))%>%
+  mutate(sd = lag(rollapply(weekly_counts$new_cases,width=4,FUN=sd,fill=0,align="r")))
+#set values for increasing, decreasing by 1 z-score, 2 z-scores
+rolling <- rolling %>%
+  mutate(sdx2 = 2*sd)
+rolling <- rolling %>%
+  mutate(inc_1sd = mean_4wk+sd)%>%
+  mutate(inc_2sd = mean_4wk+sdx2)%>%
+  mutate(dec_1sd = mean_4wk-sd)%>%
+  mutate(dec_2sd = mean_4wk-sdx2)
+#create column to tell if weekly count is decreasing or increasing compared to mean and sd
+rolling <- rolling %>%
+  mutate(direction_change = case_when(
+    new_cases < dec_2sd ~ "Significant Decrease",
+    new_cases > dec_2sd & new_cases < dec_1sd ~ "Slight Decrease",
+    new_cases > dec_1sd & new_cases < inc_1sd ~ "No Change",
+    new_cases > inc_1sd & new_cases < inc_2sd ~ "Slight Increase",
+    new_cases > inc_2sd ~ "Significant Increase"
+  ))
+
+
+
+rolling_summary <- select(rolling, WeekYear, Sex, new_cases, mean_4wk, direction_change)
+
+rolling_summary <- rolling_summary %>% group_by(Sex) %>% 
+  arrange(desc(WeekYear)) %>% 
+  filter(row_number() == 1)
+
+
+kable(rolling_summary, col.names=(c('Week of Year','Sex','Count','Previous 4-Week Mean', 'Trend for Current Week')), align='llccc')
+
+```
+
+
+
+
+Map Comparison
+=======================================================================
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Kansas `r params$definition` Query, `r startDate` to `r endDate`
+
+```{r}
+# corrects for the warning message about geometry
+sf_use_s2(FALSE)
+tmap_mode("view")  # sets map to interactive mode
+tmap_options(basemaps = "OpenStreetMap", check.and.fix = TRUE) # sets background map
+# the popup.vars sub-argument takes its first arg as the text you want it to display, and the second being the variable name, both are in quotes
+
+map_var <- "visit_rate" # the main variable that will be mapped to the color scale
+
+
+# for Zip Codes 
+if(params$map =="Zip Code Tabulated Area"){
+
+KSmap <- 
+  tm_shape(ks_county_sf) + 
+    tm_polygons(alpha = 0) +
+  tm_shape(combined)+
+    tm_polygons(col = map_var, 
+              palette = "-cividis", #"YlGnBu", "Reds", "-viridis"
+              alpha = .55,
+              id = "GEOID20", 
+              popup.vars = c("Zip Code " = "GEOID20", 
+                             "Population Est. " = "estimate",
+                             "Visit Counts " = "N_visits_per_zip", 
+                             "Visit Range " = "Visit_Count_Range",
+                             "Visit Rate (%) " = "visit_rate"
+                             )
+                ) +
+    tm_legend( legend.format = list(fun = function(map_var) 
+                                    format(map_var, 
+                                            format = "d", 
+                                            digits = 1, 
+                                            mode = "double")
+                                   )
+              )
+
+#mapping it 
+KSmap +
+  tm_view(set.view = c(-97.772168, 39.03625, 7)) +  # lon , lat, zoom -98.6, 38.2, 7
+  tm_mouse_coordinates()
+}
+
+
+
+
+# for mapping just counties with no zip codes
+if(params$map =="County View"){
+  
+KSmap <- 
+  tm_shape(ks_county_sf) + 
+    tm_polygons(alpha = 0) +
+  tm_shape(combined2)+
+    tm_polygons(col = map_var, 
+              palette = "-cividis", #"YlGnBu", "Reds", "-viridis"
+              alpha = .55,
+              id = "GEOID20", 
+              popup.vars = c("County " = "NAME", 
+                             "Population Est. " = "estimate",
+                             "Visit Counts " = "N_visits_per_county", 
+                             "Visit Range " = "Visit_Count_Range",
+                             "Visit Rate (%) " = "visit_rate"
+                             )
+                ) +
+    tm_legend( legend.format = list(fun = function(map_var) 
+                                    format(map_var, 
+                                            format = "f", 
+                                            digits = 2, 
+                                            mode = "double"
+                                           )
+                                   )
+              )
+
+#mapping it 
+KSmap +
+  tm_view(set.view = c(-97.772168, 39.03625, 7)) +  # lon , lat, zoom -98.6, 38.2, 7
+  tm_mouse_coordinates()
+}
+
+
+
+```
+
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Comparison View
+
+```{r}
+# zoomed to KC Metro 
+
+# for zip code view
+if(params$map =="Zip Code Tabulated Area"){
+
+KSinset <- 
+  tm_shape(ks_county_sf) + 
+    tm_polygons(alpha = 0) +
+  tm_shape(combined)+
+    tm_polygons(col = map_var, 
+              palette = "-cividis", #"YlGnBu", "Reds", "-viridis"
+              alpha = .55,
+              id = "GEOID20", 
+              popup.vars = c("Zip Code " = "GEOID20", 
+                             "Population Est. " = "estimate",
+                             "Visit Counts " = "N_visits_per_zip", 
+                             "Visit Range " = "Visit_Count_Range",
+                             "Visit Rate (%) " = "visit_rate"
+                             ) , 
+              legend.show = FALSE
+              ) +
+    tm_legend( legend.format = list(fun = function(map_var) 
+                                    format(map_var, 
+                                            format = "d", 
+                                            digits = 1, 
+                                            mode = "double")
+                                   )
+              )
+
+KSinset +
+  tm_view(set.view = c(-94.89578, 39.07251, 10)) +  # lon , lat, zoom
+  tm_mouse_coordinates() 
+}
+
+
+
+# for county view
+
+if(params$map =="County View"){
+
+KSinset <- 
+  tm_shape(ks_county_sf) + 
+    tm_polygons(alpha = 0) +
+  tm_shape(combined2)+
+    tm_polygons(col = map_var, 
+              palette = "-cividis", #"YlGnBu", "Reds", "-viridis" 
+              alpha = .55,
+              id = "GEOID20", 
+              popup.vars = c("County " = "NAME", 
+                             "Population Est. " = "estimate",
+                             "Visit Counts " = "N_visits_per_county", 
+                             "Visit Range " = "Visit_Count_Range",
+                             "Visit Rate (%) " = "visit_rate"
+                             ) , 
+              legend.show = FALSE
+              ) +
+    tm_legend( legend.format = list(fun = function(map_var) 
+                                    format(map_var, 
+                                            format = "f", 
+                                            digits = 2, 
+                                            mode = "double")
+                                   )
+              )
+
+KSinset +
+  tm_view(set.view = c(-94.89578, 39.07251, 10)) +  # lon , lat, zoom
+  tm_mouse_coordinates() 
+}
+
+
+```
+
+
+```{r}
+# # Wichita Metro 
+# 
+# KSinset +
+#   tm_view(set.view = c(-97.33749, 37.68817 , 10)) +  # lon , lat, zoom
+# #  tm_layout(title = "Wichita Metro Suicide Query") +
+#   tm_mouse_coordinates()
+```
+
+
+```{r}
+# Topeka & Lawrence Metro 
+
+# KSinset +
+#   tm_view(set.view = c(-95.54260, 39.06718 , 10)) +  # lon , lat, zoom
+# #  tm_layout(title = "Topeka & Lawrence Metro Suicide Query") +
+#   tm_mouse_coordinates()
+```
+
+
+
+### Table View
+
+```{r}
+
+#This makes the table of values to quickly search or see along with the maps
+if(params$map =="Zip Code Tabulated Area"){
+  
+tablecomb <- combined %>% as.data.frame(combined) %>%
+  select(ZCTA5CE20, N_visits_per_zip, estimate, visit_rate) 
+
+tablecomb <- tablecomb %>%
+  arrange(desc(N_visits_per_zip)) %>%
+  mutate(visit_rate = round(visit_rate, 3)) %>%
+  rename(`Visit Rate (%)` = visit_rate,
+         `Zip Population` = estimate, 
+         `Zip Code` = ZCTA5CE20, 
+         `Number of Visits` = N_visits_per_zip ) %>%
+   paged_table(options = list(rows.print = 10))
+datatable(tablecomb)
+}
+
+
+if(params$map =="County View"){
+  
+  tablecomb <- combined2 %>% as.data.frame(combined2) %>%
+  select(NAME, N_visits_per_county, estimate, visit_rate) 
+  
+tablecomb <- tablecomb %>%
+  arrange(desc(N_visits_per_county)) %>%
+  mutate(visit_rate = round(visit_rate, 3)) %>%
+  rename(`Visit Rate (%)` = visit_rate,
+         `County Population` = estimate, 
+         `County` = NAME, 
+         `Number of Visits` = N_visits_per_county ) %>%
+   paged_table(options = list(rows.print = 10))
+datatable(tablecomb)
+}
+
+```
+
+
+
+Map Over Time 
+=======================================================================
+
+
+```{r}
+library(gganimate)
+library(transformr)
+```
+
+Column 
+-----------------------------------------------------------------------
+### Kansas `r params$definition` Query, `r startDate` to `r endDate`
+```{r}
+# Testing out animated map of record visits over time 
+
+#mapview <- query_clean$ZipCode #params$map
+
+# loading ks zcta shapefile data using 2010 values for error
+#ks_zcta10_sf <- read_sf('~jhodge01/KS_DSTT/zip2010sf/zip2010sf.shp')
+
+annobj <- query_clean %>%
+  group_by(Date, Region) %>%
+  summarise(Records_Per_Day = n(), .groups = "drop") %>%
+  mutate(Region = as.character(Region)) %>%
+  mutate(Date = as.Date(Date, format = "%m/%d/%Y")) %>%
+  arrange(Date)
+
+annmap1 <- query_clean %>%
+  group_by(Region) %>%
+   summarise(Records_Per_Day = n(), .groups = "drop")
+
+annmap <- ks_county_sf %>%
+  left_join(annmap1, by = c("NAME" = "Region")) 
+ # left_join(annobj, by = c("ZCTA5CE20" = "ZipCode")) #2020 ZCTA's
+ # left_join(annobj, by = c("ZCTA5CE10" = "ZipCode")) #2010 ZCTA's
+
+
+p <- ggplot() +
+        geom_sf(data = ks_county_sf) +
+     #   geom_sf(data = ks_zcta10_sf) +
+        geom_sf(data = annmap, aes(fill = Records_Per_Day))+
+        scale_fill_viridis(direction = -1) + 
+        theme(axis.text.x = element_blank(),
+            axis.text.y = element_blank(),
+            axis.ticks = element_blank(), 
+            rect = element_blank()
+            )+ 
+        labs(fill='Cumulative Records') 
+p
+
+annmap2 <- ks_county_sf %>%
+  left_join(annobj, by = c("NAME" = "Region")) 
+
+pp <- ggplot() +
+        geom_sf(data = ks_county_sf) +
+     #   geom_sf(data = ks_zcta10_sf) +
+        geom_sf(data = annmap2, aes(fill = Records_Per_Day))+
+        scale_fill_viridis(direction = -1) + 
+        theme(axis.text.x = element_blank(),
+            axis.text.y = element_blank(),
+            axis.ticks = element_blank(), 
+            rect = element_blank()
+            )+ 
+        labs(fill='Records Per Day')
+
+```
+
+Column 
+-----------------------------------------------------------------------
+
+### Map of Kansas `r params$definition` Query, `r startDate` to `r endDate` Record Visits Over Time
+```{r}
+ap <- pp + 
+  transition_time(Date)  + ggtitle('Date: {frame_time}', subtitle = 'Time {frame} of {nframes}') 
+  
+num_dates <- max(annobj$Date) - min(annobj$Date) + 1
+
+
+animate(ap, nframes = num_dates, fps = 1)
+
+
+```
+
+
+
+
+
+
+Term Network Graph
+=======================================================================
+```{r comp_data, echo = FALSE, warning = FALSE, message = FALSE}
+data <- query %>%
+  clean_text() %>%
+  separate(week_year, c("year", "week"), sep = "-", remove = TRUE) %>%
+  mutate(
+    week = as.numeric(week),
+    year = as.numeric(year)
+  ) %>%
+  filter(!is.na(week)) %>%
+  mutate(
+    date = MMWRweek2Date(year, week, MMWRday = NULL),
+    linenumber = row_number(),
+    month = round_date(date, "month")
+  )
+
+```
+
+```{r data and dictionary import, echo = FALSE, warning = FALSE, message = FALSE}
+
+dictionary <- openxlsx::read.xlsx("ICD10v2.xlsx") %>%
+             # read_csv("icd10_crosswalk_2022.csv") %>% 
+  as_tibble() %>%
+  clean_names() %>%
+  add_row(code = "U07.1", description = "COVID-19, virus identified") %>%
+  add_row(code = "U071", description = "COVID-19, virus identified") %>%
+  add_row(code = "M79.10", description = "Myalgia, unspecified site") %>%
+  add_row(code = "M7910", description = "Myalgia, unspecified site") %>%
+  add_row(code = "Z11.52", description = "Encounter for screening for COVID-19") %>%
+  add_row(code = "Z1152", description = "Encounter for screening for COVID-19") %>%
+  add_row(code = "Z20.822", description = "Contact with and (suspected) exposure to COVID-19") %>%
+  add_row(code = "Z20822", description = "Contact with and (suspected) exposure to COVID-19") %>%
+  add_row(code = "Z86.16", description = "Personal history of COVID-19") %>%
+  add_row(code = "Z8616", description = "Personal history of COVID-19") %>%
+  add_row(code = "M35.81", description = "Multisystem inflammatory syndrome (MIS)") %>%
+  add_row(code = "M3581", description = "Multisystem inflammatory syndrome (MIS)") %>%
+  add_row(code = "M35.89", description = "Other specified systemic involvement of connective tissue") %>%
+  add_row(code = "M3589", description = "Other specified systemic involvement of connective tissue") %>%
+  add_row(code = "J12.82", description = "Pneumonia due to coronavirus disease") %>%
+  add_row(code = "J1282", description = "Pneumonia due to coronavirus disease") %>%
+  arrange(code)
+
+```
+
+### Kansas CCDD Term Co-occurrence Network Graph `r params$definition` Query, `r startDate` to `r endDate`
+
+```{r CCDD network, echo = FALSE, message = FALSE, warning = FALSE, fig.width = 15, fig.height = 10}
+
+edges <- data %>%
+  unnest_tokens(word, ccdd2) %>%
+  filter(!is.na(word)) %>%
+  anti_join(stop_words) %>%
+  filter(nchar(word) > 2) %>%
+  pairwise_count(word, linenumber, sort = TRUE, upper = FALSE) %>%
+  top_n(200) %>%
+  slice(1:200) %>%
+  mutate(
+    item1 = toupper(item1),
+    item2 = toupper(item2)
+  )
+
+colnames(edges) <- c("from", "to", "title")
+
+nodes <- unique(c(edges$from, edges$to)) %>%
+  as_tibble()
+colnames(nodes) <- "label"
+nodes$id <- nodes$label
+nodes$font.size <- rep(30, nrow(nodes))
+
+nodes <- left_join(nodes, dictionary, by = c("id" = "code")) %>%
+  dplyr::distinct()
+ 
+colnames(nodes)[4] <- "title"
+
+a <- 1
+b <- 20
+c <- min(edges$title)
+d <- max(edges$title)
+
+edges$width <- a + ((b - a) / (d - c)) * (edges$title - c)
+graph <- graph_from_data_frame(edges, directed = FALSE)
+cluster <- cluster_louvain(graph)
+cluster_df <- data.frame(as.list(membership(cluster)))
+cluster_df <- as.data.frame(t(cluster_df))
+cluster_df$label <- rownames(cluster_df)
+nodes <- left_join(nodes, cluster_df, by = "label")
+colnames(nodes)[5] <- "group"
+
+visNetwork(nodes, edges, height = "500px", width = "100%") %>%
+  visIgraphLayout() %>%
+  visInteraction(zoomView = TRUE) %>%
+  visNodes(
+    shape = "dot",
+    color = list(background = "#0085AF", border = "#013848", highlight = "#FF8000"),
+    shadow = list(enabled = TRUE, size = 10)
+  ) %>%
+  visEdges(color = list(color = "#0085AF", highlight = "#C62F4B")) %>%
+  visOptions(
+    selectedBy = "group",
+    highlightNearest = list(enabled = TRUE, degree = 1, hover = TRUE),
+    nodesIdSelection = TRUE
+  ) %>%
+  visLayout(randomSeed = 2001)
+```
+
+Increasing Terms & Codes
+=======================================================================
+
+
+
+```{r CC unigram frequencies, echo = FALSE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 50}
+unnested_cc_unigrams <- data %>%
+  unnest_tokens(word, chief_complaint_parsed) %>%
+  filter(!is.na(word)) %>%
+  filter(!grepl("\\d+", word)) %>%
+  filter(nchar(word) > 2) %>%
+  anti_join(stop_words)
+
+ccngram <- unnested_cc_unigrams %>%
+  count(word, sort = TRUE) %>%
+  top_n(200) %>%
+  slice(1:200) %>%
+  mutate(
+    word = str_to_upper(word),
+    word = factor(word, levels = unique(word)[order(n, decreasing = TRUE)])
+  )
+
+unnested_dd_unigrams <- data %>%
+  unnest_tokens(word, discharge_diagnosis) %>%
+  anti_join(stop_words)
+
+ddngram <- unnested_dd_unigrams %>%
+  count(word, sort = TRUE) %>%
+  ungroup() %>%
+  top_n(200) %>%
+  mutate(word = toupper(word)) %>%
+  left_join(dictionary, by = c("word" = "code")) %>%
+  distinct() %>%
+  mutate(
+    word = factor(word, levels = unique(word)[order(n, decreasing = TRUE)])
+  )
+
+unnested_cc_bigrams <- data %>%
+  unnest_tokens(bigram, chief_complaint_parsed, token = "ngrams", n = 2) %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ", remove = FALSE) %>%
+  filter(
+    !is.na(bigram),
+    !word1 %in% stop_words$word & !word2 %in% stop_words$word,
+    nchar(word1) > 2 & nchar(word2) > 2,
+    !grepl("\\d+", word1) & !grepl("\\d+", word2)
+  )
+
+cc_bigram_top200 <- unnested_cc_bigrams %>%
+  count(bigram, sort = TRUE) %>%
+  top_n(200) %>%
+  slice(1:200) %>%
+  mutate(
+    bigram = str_to_upper(bigram),
+    bigram = factor(bigram, levels = unique(bigram)[order(n, decreasing = TRUE)])
+  )
+
+unnested_dd_bigrams <- data %>%
+  unnest_tokens(bigram, discharge_diagnosis, token = "ngrams", n = 2) %>%
+  filter(!is.na(bigram)) %>%
+  separate(bigram, c("code1", "code2"), remove = FALSE) %>%
+  rowwise() %>%
+  mutate(bigramID = list(c(code1, code2))) %>%
+  mutate(bigramID = paste(sort(bigramID), collapse = "-"))
+
+ddngram <- unnested_dd_bigrams %>%
+  count(bigramID, sort = TRUE) %>%
+  ungroup() %>%
+  top_n(200) %>%
+  slice(1:200) %>%
+  separate(bigramID, c("code1", "code2"), sep = "-", remove = FALSE) %>%
+  mutate(
+    code1 = toupper(code1),
+    code2 = toupper(code2)
+  ) %>%
+  mutate(bigram = paste(code1, code2, sep = " ")) %>%
+  left_join(dictionary, by = c("code1" = "code")) %>%
+  left_join(dictionary, by = c("code2" = "code")) %>%
+  rename(
+    description1 = description.x,
+    description2 = description.y
+  ) %>%
+  mutate(bigram = factor(bigram, levels = unique(bigram)[order(n, decreasing = TRUE)])) %>%
+  distinct()
+
+ccngram <- data %>%
+  unnest_tokens(trigram, chief_complaint_parsed, token = "ngrams", n = 3) %>%
+  separate(trigram, into = c("word1", "word2", "word3"), sep = " ", remove = FALSE) %>%
+  filter(
+    !is.na(trigram),
+    !word1 %in% stop_words$word & !word2 %in% stop_words$word & !word3 %in% stop_words$word,
+    nchar(word1) > 2 & nchar(word2) > 2 & nchar(word3) > 2,
+    !grepl("\\d+", word1) & !grepl("\\d+", word2) & !grepl("\\d+", word3)
+  ) %>%
+  count(trigram, sort = TRUE) %>%
+  top_n(200) %>%
+  slice(1:200) %>%
+  mutate(
+    trigram = str_to_upper(trigram),
+    trigram = factor(trigram, levels = unique(trigram)[order(n, decreasing = TRUE)])
+  )
+
+ddngram <- data %>%
+  unnest_tokens(trigram, discharge_diagnosis, token = "ngrams", n = 3) %>%
+  filter(!is.na(trigram)) %>%
+  separate(trigram, c("code1", "code2", "code3"), remove = FALSE) %>%
+  rowwise() %>%
+  mutate(trigramID = list(c(code1, code2, code3))) %>%
+  mutate(trigramID = paste(sort(trigramID), collapse = "-")) %>%
+  count(trigramID, sort = TRUE) %>%
+  ungroup() %>%
+  top_n(200) %>%
+  slice(1:200) %>%
+  separate(trigramID, c("code1", "code2", "code3"), sep = "-", remove = FALSE) %>%
+  mutate(
+    code1 = toupper(code1),
+    code2 = toupper(code2),
+    code3 = toupper(code3)
+  ) %>%
+  mutate(trigram = paste(code1, code2, code3, sep = " ")) %>%
+  left_join(dictionary, by = c("code1" = "code")) %>%
+  left_join(dictionary, by = c("code2" = "code")) %>%
+  left_join(dictionary, by = c("code3" = "code")) %>%
+  rename(
+    description1 = description.x,
+    description2 = description.y,
+    description3 = description
+  ) %>%
+  mutate(trigram = factor(trigram, levels = unique(trigram)[order(n, decreasing = TRUE)])) %>%
+  distinct()
+
+
+pal <- c("#003C67FF", "#4A6990FF")
+
+# Static ggraph option
+check_row <- unnested_cc_unigrams %>%
+  select(
+    linenumber,
+    word
+  ) %>%
+  group_by(word) %>%
+  filter(n() >= 20) %>%
+  nrow()
+
+cc_cor1 <- unnested_cc_unigrams %>%
+  select(
+    linenumber,
+    word
+  ) %>%
+  group_by(word) %>%
+  {if(check_row != 0) filter(., n() >= 20) else filter(., n() > 0)} %>%
+  pairwise_cor(word, linenumber, sort = TRUE) %>%
+  filter(correlation > 0.15) %>%
+  mutate(
+    pair1 = paste(item1, item2),
+    pair2 = paste(item2, item1)
+  ) %>%
+  filter(!pair1 %in% unnested_cc_bigrams$bigram) %>%
+  filter(!pair2 %in% unnested_cc_bigrams$bigram)
+
+# if (nrow(cc_cor1) > 10) {
+# cc_cor_graph <- cc_cor1 %>%
+#   graph_from_data_frame()
+
+# cc_cor_graph %>% 
+#   ggraph(layout = "fr") +
+#   geom_edge_link(aes(edge_alpha = correlation), show.legend = FALSE) +
+#   geom_node_point(color = pal[1], size = 5) +
+#   geom_node_text(aes(label = name), repel = TRUE) +
+#   theme_void() +
+#   labs(
+#     title = "Pairs of terms with at least a 0.15 correlation of appearting within the same chief complaint. Consecutive term pairs/bigrams removed.",
+#     caption = "Opacity of line represents magnitude of correlation"
+#   )
+# } else {
+#   cat("Not a sufficient number of terms to render network graph.")
+# }
+
+
+
+```
+
+```{r ngram analysis, echo = FALSE, warning = FALSE, message = FALSE}
+
+cc_unigram_analysis <- unnested_cc_unigrams %>%
+  mutate(time_floor = floor_date(date, unit = "1 week")) %>%
+  count(time_floor, word) %>%
+  complete(word, time_floor, fill = list(n = 0)) %>%
+  group_by(time_floor) %>%
+  mutate(time_total = sum(n)) %>%
+  group_by(word) %>%
+  mutate(ngram_total = sum(n)) %>%
+  rename(count = n) %>%
+  filter(ngram_total > 30) %>%
+  mutate(
+    frequency = (count / time_total),
+    frequency = ifelse(is.infinite(frequency), 0, frequency),
+    frequency = ifelse(is.nan(frequency), 0, frequency)
+  ) %>%
+  nest(data = -word) %>%
+  mutate(
+    models = map(data, ~ glm(cbind(count, time_total - count) ~ time_floor, ., family = "binomial") %>% tidy())
+  ) %>%
+  unnest(models)
+
+if (nrow(cc_unigram_analysis) > 0) {
+  cc_unigram_filtered <- cc_unigram_analysis %>%
+    filter(term == "time_floor") %>%
+    mutate(adjusted.p.value = p.adjust(p.value)) %>%
+    filter(adjusted.p.value < 0.01) %>%
+    arrange(adjusted.p.value) %>%
+    unnest(data) %>%
+    mutate(word = toupper(word))
+} else {
+  cc_unigram_filtered <- cc_unigram_analysis %>%
+    mutate(statistic = NA)
+}
+
+cc_bigram_analysis <- unnested_cc_bigrams %>%
+  mutate(time_floor = floor_date(date, unit = "1 week")) %>%
+  count(time_floor, bigram) %>%
+  complete(bigram, time_floor, fill = list(n = 0)) %>%
+  group_by(time_floor) %>%
+  mutate(time_total = sum(n)) %>%
+  group_by(bigram) %>%
+  mutate(ngram_total = sum(n)) %>%
+  rename(count = n) %>%
+  filter(ngram_total > 30) %>%
+  mutate(
+    frequency = (count / time_total),
+    frequency = ifelse(is.infinite(frequency), 0, frequency),
+    frequency = ifelse(is.nan(frequency), 0, frequency)
+  ) %>%
+  nest(data = -bigram) %>%
+  mutate(
+    models = map(data, ~ glm(cbind(count, time_total - count) ~ time_floor, ., family = "binomial") %>% tidy())
+  ) %>%
+  unnest(models)
+
+if (nrow(cc_bigram_analysis) > 0) {
+  cc_bigram_filtered <- cc_bigram_analysis %>%
+    filter(term == "time_floor") %>%
+    mutate(adjusted.p.value = p.adjust(p.value)) %>%
+    filter(adjusted.p.value < 0.01) %>%
+    arrange(adjusted.p.value) %>%
+    unnest(data) %>%
+    mutate(bigram = toupper(bigram))
+} else {
+  cc_bigram_filtered <- cc_bigram_analysis %>%
+    mutate(statistic = NA)
+}
+
+dd_unigram_analysis <- unnested_dd_unigrams %>%
+  mutate(time_floor = floor_date(date, unit = "1 week")) %>%
+  count(time_floor, word) %>%
+  complete(word, time_floor, fill = list(n = 0)) %>%
+  group_by(time_floor) %>%
+  mutate(time_total = sum(n)) %>%
+  group_by(word) %>%
+  mutate(ngram_total = sum(n)) %>%
+  rename(count = n) %>%
+  filter(ngram_total > 30) %>%
+  mutate(
+    frequency = (count / time_total),
+    frequency = ifelse(is.infinite(frequency), 0, frequency),
+    frequency = ifelse(is.nan(frequency), 0, frequency)
+  ) %>%
+  nest(data = -word) %>%
+  mutate(
+    models = map(data, ~ glm(cbind(count, time_total - count) ~ time_floor, ., family = "binomial") %>% tidy())
+  ) %>%
+  unnest(models)
+
+if (nrow(dd_unigram_analysis) > 0) {
+  dd_unigram_filtered <- dd_unigram_analysis %>%
+    filter(term == "time_floor") %>%
+    mutate(adjusted.p.value = p.adjust(p.value)) %>%
+    filter(adjusted.p.value < 0.01) %>%
+    arrange(adjusted.p.value) %>%
+    unnest(data) %>%
+    mutate(word = toupper(word)) %>%
+    inner_join(dictionary, by = c("word" = "code"))
+} else {
+  dd_unigram_filtered <- dd_unigram_analysis %>%
+    mutate(statistic = NA)
+}
+
+dd_bigram_analysis <- unnested_dd_bigrams %>%
+  mutate(time_floor = floor_date(date, unit = "1 week")) %>%
+  count(time_floor, bigramID) %>%
+  complete(bigramID, time_floor, fill = list(n = 0)) %>%
+  group_by(time_floor) %>%
+  mutate(time_total = sum(n)) %>%
+  group_by(bigramID) %>%
+  mutate(ngram_total = sum(n)) %>%
+  rename(count = n) %>%
+  filter(ngram_total > 30) %>%
+  mutate(
+    frequency = (count / time_total),
+    frequency = ifelse(is.infinite(frequency), 0, frequency),
+    frequency = ifelse(is.nan(frequency), 0, frequency)
+  ) %>%
+  separate(bigramID, c("code1", "code2"), sep = "-", remove = FALSE) %>%
+  mutate(
+    code1 = toupper(code1),
+    code2 = toupper(code2),
+    bigram = paste(code1, code2, sep = " ")
+  ) %>%
+  nest(data = -bigram) %>%
+  mutate(
+    models = map(data, ~ glm(cbind(count, time_total - count) ~ time_floor, ., family = "binomial") %>% tidy())
+  ) %>%
+  unnest(models)
+
+if (nrow(dd_bigram_analysis) > 0) {
+  dd_bigram_filtered <- dd_bigram_analysis %>%
+    filter(term == "time_floor") %>%
+    mutate(adjusted.p.value = p.adjust(p.value)) %>%
+    filter(adjusted.p.value < 0.01) %>%
+    arrange(adjusted.p.value) %>%
+    unnest(data) %>%
+    mutate(bigram = toupper(bigram)) %>%
+    separate(bigram, c("code1", "code2"), remove = FALSE) %>%
+    inner_join(dictionary, by = c("code1" = "code")) %>%
+    inner_join(dictionary, by = c("code2" = "code")) %>%
+    rename(
+      description1 = description.x,
+      description2 = description.y
+    )
+} else {
+  dd_bigram_filtered <- dd_bigram_analysis %>%
+    mutate(statistic = NA)
+}
+
+cc_unigrams_increasing <- cc_unigram_filtered %>%
+  filter(statistic > 0)
+
+cc_unigrams_decreasing <- cc_unigram_filtered %>%
+  filter(statistic < 0)
+
+cc_bigrams_increasing <- cc_bigram_filtered %>%
+  filter(statistic > 0)
+
+cc_bigrams_decreasing <- cc_bigram_filtered %>%
+  filter(statistic < 0)
+
+dd_unigrams_increasing <- dd_unigram_filtered %>%
+  filter(statistic > 0)
+
+dd_unigrams_decreasing <- dd_unigram_filtered %>%
+  filter(statistic < 0)
+
+dd_bigrams_increasing <- dd_bigram_filtered %>%
+  filter(statistic > 0)
+
+dd_bigrams_decreasing <- dd_bigram_filtered %>%
+  filter(statistic < 0)
+
+ht1 <- max(length(unique(cc_unigrams_increasing$word)), length(unique(dd_unigrams_increasing$word))) * 4
+ht2 <- max(length(unique(cc_unigrams_decreasing$word)), length(unique(dd_unigrams_decreasing$word))) * 4
+
+ht3 <- max(length(unique(cc_bigrams_increasing$bigram)), length(unique(dd_bigrams_increasing$bigram))) * 4
+ht4 <- max(length(unique(cc_bigrams_decreasing$bigram)), length(unique(dd_bigrams_decreasing$bigram))) * 4
+```
+
+
+Trends represent the proportion of term occurrences on a weekly time resolution. The numerator is the number of occurrences of the term in a specific week, while the denominator is the sum of all term frequencies in that week. A binomial model is fit to each time series to determine if term occurrence has changed significantly over time. Terms with a positive slope (test statistic) and adjusted p-value < 0.01 are categorized as having significant increase, while terms with a negative slope and adjusted p-value < 0.01 are categorized as having significant decrease.
+
+Column 
+-----------------------------------------------------------------------
+
+### Change in Individual CC Unigram Trends - Increasing, `r params$definition`, `r startDate` to `r endDate`
+
+```{r CC increasing unigram, echo = FALSE, message = FALSE, warning = FALSE, fig.height = ht1}
+
+pal <- c("#003C67FF", "#4A6990FF")
+
+if (nrow(cc_unigrams_increasing) > 0) {
+  tab_gg <- cc_unigrams_increasing %>%
+    select(word, statistic, adjusted.p.value, time_floor, frequency) %>%
+    mutate(adjusted.p.value = format(adjusted.p.value, digits = 3, scientific = TRUE)) %>%
+    nest(data = c(time_floor, frequency)) %>%
+    mutate(trend = map(.x = data, .f = function(.x) {
+      ggplot(data = .x) +
+        geom_line(aes(x = time_floor, y = frequency), color = pal[2]) +
+        scale_y_continuous(limits = c(0, NA)) +
+        theme_few() +
+        labs(
+          x = "",
+          y = ""
+        ) +
+        theme(plot.margin = unit(c(0.5, 1, 0.5, 0.5), "lines"))
+    }))
+  
+  ft_gg <- tab_gg %>%
+    flextable(col_keys = c("word", "statistic", "adjusted.p.value", "trend")) %>%
+    set_header_labels(
+      word = "Chief Complaint Unigram",
+      statistic = "Statistic",
+      adjusted.p.value = "Adjusted p-value",
+      trend = "Trend"
+    ) %>%
+    mk_par(j = "trend", value = as_paragraph(
+      gg_chunk(value = trend, width = 4, height = 2)
+    )) %>%
+    theme_box() %>%
+    colformat_double(digits = 2)
+  
+  ft_gg
+} else {
+  cat("No significantly increasing unigrams found.")
+}
+``` 
+
+Column 
+-----------------------------------------------------------------------
+
+### Change in Individual DD Unigram Trends - Increasing, `r params$definition`, `r startDate` to `r endDate`
+
+```{r DD increasing unigram, echo = FALSE, message = FALSE, warning = FALSE, fig.height = ht1}
+
+if (nrow(dd_unigrams_increasing) > 0) {
+  tab_gg <- dd_unigrams_increasing %>%
+    select(word, description, statistic, adjusted.p.value, time_floor, frequency) %>%
+    mutate(adjusted.p.value = format(adjusted.p.value, digits = 3, scientific = TRUE)) %>%
+    nest(data = c(time_floor, frequency)) %>%
+    mutate(trend = map(.x = data, .f = function(.x) {
+      ggplot(data = .x) +
+        geom_line(aes(x = time_floor, y = frequency), color = pal[2]) +
+        scale_y_continuous(limits = c(0, NA)) +
+        theme_few() +
+        labs(
+          x = "",
+          y = ""
+        ) +
+        theme(plot.margin = unit(c(0.5, 1, 0.5, 0.5), "lines"))
+    }))
+  
+  ft_gg <- tab_gg %>%
+    flextable(col_keys = c("word", "description", "statistic", "adjusted.p.value", "trend")) %>%
+    set_header_labels(
+      word = "ICD-10 Unigram",
+      description = "Description",
+      statistic = "Statistic",
+      adjusted.p.value = "Adjusted p-value",
+      trend = "Trend"
+    ) %>%
+    mk_par(j = "trend", value = as_paragraph(
+      gg_chunk(value = trend, width = 4, height = 2)
+    )) %>%
+    theme_box() %>%
+    colformat_double(digits = 2)
+  
+  ft_gg
+} else {
+  cat("No significantly increasing unigrams found.")
+}
+```
+
+
+Overlapping Syndromes  {data-orientation=rows}
+=======================================================================
+Row
+-----------------------------------------------------------------------
+
+### Boxplot & Violin Plot of Age by Queried Category,  `r startDate` to `r endDate`
+```{r query_compare, echo=FALSE}
+# graph for comparison
+
+pAgec <- ggplot(allquery,aes(y=C_Patient_Age,x=category))+
+  geom_boxplot(width=.2)+
+  geom_violin(fill = "yellow", alpha = .58)+
+  theme_minimal()+
+  theme(#axis.text.x=element_text( angle=90 ),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), 
+        axis.ticks=element_blank())+ 
+  #expand_limits(x=0, y=0)+
+  labs(x="Queried Category", y="Age in Years") #+
+ # scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+  
+  #
+#plot(pAgec)
+ggplotly(pAgec)
+```
+
+
+### Time Series Plot by Queried Category,  `r startDate` to `r endDate`
+```{r query_compare2, echo=FALSE}
+query_weekc <- allquery %>%
+  count(category,WeekYear)
+agetimec <- 
+ggplot(query_weekc, aes(x=WeekYear, y=n, group=category, color=category))+  
+  geom_line()+ geom_point()  +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 5))+
+  theme_minimal()+
+  theme(axis.text.x=element_text( angle=90 ),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_blank(), 
+        axis.ticks=element_blank(), 
+        legend.position = "bottom"
+        ) +
+    expand_limits(x=0, y=0)+
+  labs(x="Week of Year", y="# ED Visits")
+
+#agetimec
+
+ ggplotly(agetimec) #%>% 
+  # layout(legend = list(orientation = "h", x = 0.9, y = -0.6))
+
+
+```
+
+Row
+-----------------------------------------------------------------------
+```{r query_compare3, echo=FALSE}
+
+ # kable(countbysyndrc, align='lccc')
+ # kable(countbysyndrc1, align='lccc')
+ # kable(countbysyndrc2, align='lccc')
+
+```
+
+
+### Table of CCDD Categories among `r params$definition` Cases:  `r startDate` to `r endDate`
+```{r query_compare31, echo=FALSE}
+# kable(comparetable1,col.names=(c('Additional CCDD Categories','Count','Total Cases','% of Queried Syndrome Cases')), align='lccc')
+
+datatable(comparetable1, colnames = c('Additional CCDD Categories','Count','Total Cases','% of Queried Syndrome Cases'))
+```
+
+### Table of CCDD Categories among `r params$comparison1` Cases: `r startDate` to `r endDate`
+```{r query_compare32, echo=FALSE}
+# kable(comparetable2,col.names=(c('Additional CCDD Categories','Count','Total Cases','% of Comparison Syndrome 1 Cases')), align='lccc')
+
+datatable(comparetable2, colnames = c('Additional CCDD Categories','Count','Total Cases','% of Comparison Syndrome 1 Cases'))
+
+```
+
+### Table of CCDD Categories among `r params$comparison2` Cases: `r startDate` to `r endDate`
+```{r query_compare33, echo=FALSE}
+# kable(comparetable3,col.names=(c('Additional CCDD Categories','Count','Total Cases','% of Comparison Syndrome 2 Cases')), align='lccc')
+
+datatable(comparetable3, colnames = c('Additional CCDD Categories','Count','Total Cases','% of Comparison Syndrome 2 Cases'))
+
+```
